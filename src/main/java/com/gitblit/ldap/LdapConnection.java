@@ -30,6 +30,7 @@ import com.unboundid.ldap.sdk.BindRequest;
 import com.unboundid.ldap.sdk.BindResult;
 import com.unboundid.ldap.sdk.DereferencePolicy;
 import com.unboundid.ldap.sdk.ExtendedResult;
+import com.unboundid.ldap.sdk.GSSAPIBindRequest;
 import com.unboundid.ldap.sdk.LDAPConnection;
 import com.unboundid.ldap.sdk.LDAPException;
 import com.unboundid.ldap.sdk.LDAPSearchException;
@@ -49,9 +50,9 @@ public class LdapConnection implements AutoCloseable {
 	private IStoredSettings settings;
 
 	private LDAPConnection conn;
-	private SimpleBindRequest currentBindRequest;
-	private SimpleBindRequest managerBindRequest;
-	private SimpleBindRequest userBindRequest;
+	private BindRequest currentBindRequest;
+	private BindRequest managerBindRequest;
+	private BindRequest userBindRequest;
 
 
 	// From: https://www.owasp.org/index.php/Preventing_LDAP_Injection_in_Java
@@ -101,8 +102,16 @@ public class LdapConnection implements AutoCloseable {
 		String bindPassword = settings.getString(Keys.realm.ldap.password, "");
 		if (StringUtils.isEmpty(bindUserName) && StringUtils.isEmpty(bindPassword)) {
 			this.managerBindRequest = new SimpleBindRequest();
+		} else if (settings.getBoolean(Keys.realm.ldap.useGssApi, false)) {
+			try {
+				this.managerBindRequest = new GSSAPIBindRequest(bindUserName, bindPassword);
+			}
+			catch(LDAPException ex) {
+				this.managerBindRequest = new SimpleBindRequest(bindUserName, bindPassword);
+			}
+		} else {
+			this.managerBindRequest = new SimpleBindRequest(bindUserName, bindPassword);
 		}
-		this.managerBindRequest = new SimpleBindRequest(bindUserName, bindPassword);
 	}
 
 
@@ -236,18 +245,6 @@ public class LdapConnection implements AutoCloseable {
 	public boolean isAuthenticated(String userDn, String password) {
 		verifyCurrentBinding();
 
-		// If the currently bound DN is already the DN of the logging in user, authentication has already happened
-		// during the previous bind operation. We accept this and return with the current bind left in place.
-		// This could also be changed to always retry binding as the logging in user, to make sure that the
-		// connection binding has not been tampered with in between. So far I see no way how this could happen
-		// and thus skip the repeated binding.
-		// This check also makes sure that the DN in realm.ldap.bindpattern actually matches the DN that was found
-		// when searching the user entry.
-		String boundDN = currentBindRequest.getBindDN();
-		if (boundDN != null && boundDN.equals(userDn)) {
-			return true;
-		}
-
 		// Bind a the logging in user to check for authentication.
 		// Afterwards, bind as the original bound DN again, to restore the previous authorization.
 		boolean isAuthenticated = false;
@@ -324,15 +321,8 @@ public class LdapConnection implements AutoCloseable {
 		}
 		logger.debug("Unexpected binding in LdapConnection. {} != {}", lastBind, currentBindRequest);
 
-		String lastBoundDN = ((SimpleBindRequest)lastBind).getBindDN();
-		String boundDN = currentBindRequest.getBindDN();
-		logger.debug("Currently bound as '{}', check authentication for '{}'", lastBoundDN, boundDN);
-		if (boundDN != null && ! boundDN.equals(lastBoundDN)) {
-			logger.warn("Unexpected binding DN in LdapConnection. '{}' != '{}'.", lastBoundDN, boundDN);
-			logger.warn("Updated binding information in LDAP connection.");
-			currentBindRequest = (SimpleBindRequest)lastBind;
-			return false;
-		}
+		logger.warn("Updated binding information in LDAP connection.");
+		currentBindRequest = lastBind;
 		return true;
 	}
 }
